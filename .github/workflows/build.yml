@@ -30,13 +30,98 @@ jobs:
           b = s.index("class CarPlaySceneDelegate:", a)
           p.write_text(s[:a] + s[b:])
           PY
+      - name: Apply browser orientation fix
+        run: |
+          python3 - src <<'PY'
+          from pathlib import Path
+          import sys
+          root=Path(sys.argv[1])
+          p=root/'ScreenRec/SampleHandler.swift'
+          s=p.read_text()
+          s=s.replace('    // MARK: - Network Connection', '''    private let browserContext = CIContext()
+              // ReplayKit calls sample-buffer callbacks serially; control messages arrive on a network queue.
+              private var lastCaptureOrientation: CGImagePropertyOrientation = .up
+              private var viewerOrientation: CGImagePropertyOrientation = .up
+              private let orientationLock = NSLock()
+          
+              private func renderBrowserFrame(_ sample: CMSampleBuffer) {
+                  guard let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
+                  if let number = CMGetAttachment(sample, key: RPVideoSampleOrientationKey as CFString,
+                                                  attachmentModeOut: nil) as? NSNumber,
+                     let value = CGImagePropertyOrientation(rawValue: number.uint32Value) {
+                      lastCaptureOrientation = value
+                  }
+                  orientationLock.lock()
+                  let offset = viewerOrientation
+                  orientationLock.unlock()
+                  let upright = CIImage(cvPixelBuffer: buffer).oriented(lastCaptureOrientation)
+                  let display = upright.oriented(offset)
+                  if let image = browserContext.createCGImage(display, from: display.extent) {
+                      HTTPServer.shared.send(image: image)
+                  }
+              }
+          
+              // MARK: - Network Connection''')
+          s=s.replace('        connect()\n    }','        HTTPServer.shared.Start()\n        connect()\n    }',1).replace('        HTTPServer.shared.Start()\n        videoEncoder','        videoEncoder')
+          s=s.replace('minimumIncompleteLength: 2, maximumLength: 2048','minimumIncompleteLength: 1, maximumLength: 1')
+          a=s.index('                    let message =')
+          b=s.index('                        self.videoEncoder',a)
+          s=s[:a]+'''                    let command = data[data.startIndex]
+                              if let orientation = CGImagePropertyOrientation(rawValue: UInt32(command)) {
+                                  self.orientationLock.lock()
+                                  self.viewerOrientation = orientation
+                                  self.orientationLock.unlock()
+                              }
+                              if command == 0x52 {
+          '''+s[b:]
+          s=s.replace('if message == "STOP"', 'if command == 0x53')
+          a=s.index('                guard let imageBuffer',s.index('override func processSampleBuffer'))
+          b=s.index('            }\n           \n',a)
+          s=s[:a]+'                renderBrowserFrame(sampleBuffer)\n'+s[b:]
+          p.write_text(s)
+          p=root/'TDS Video/ScreenCaptureManager.swift'
+          s=p.read_text().replace('            ScreenCaptureManager.shared.UpdateOrientation(selectedOrientation)','            publishBrowserOrientation(on: connection)\n            UpdateOrientation(selectedOrientation)')
+          i=s.index('    func UpdateOrientation')
+          s=s[:i]+'''    private func publishBrowserOrientation(on connection: NWConnection?) {
+                  // The existing app-to-extension control channel carries one byte per command.
+                  let value: CGImagePropertyOrientation
+                  switch selectedOrientation {
+                  case .up: value = .up
+                  case .down: value = .down
+                  case .left: value = .left
+                  case .right: value = .right
+                  case .upMirrored: value = .upMirrored
+                  case .downMirrored: value = .downMirrored
+                  case .leftMirrored: value = .leftMirrored
+                  case .rightMirrored: value = .rightMirrored
+                  }
+                  connection?.send(content: Data([UInt8(value.rawValue)]), completion: .idempotent)
+              }
+          
+          '''+s[i:]
+          s=s.replace('                    print("Server-side: Connection is ready:', '''                    DispatchQueue.main.async {
+                                  self.publishBrowserOrientation(on: newConnection)
+                              }
+                              print("Server-side: Connection is ready:''')
+          s=s.replace('"RECONNECT".data(using: .utf8) ?? Data()', 'Data([0x52])').replace('"STOP".data(using: .utf8) ?? Data()', 'Data([0x53])')
+          p.write_text(s)
+          p=root/'TDS Video/HTTPServer.swift'
+          s=p.read_text().replace('    var currentFrame: CGImage?', '''    private let frameLock = NSLock()
+              private var latestFrame: CGImage?
+              private var currentFrame: CGImage? {
+                  frameLock.lock()
+                  defer { frameLock.unlock() }
+                  return latestFrame
+              }''').replace('        currentFrame = image','        frameLock.lock()\n        latestFrame = image\n        frameLock.unlock()')
+          p.write_text(s)
+          PY
       - name: Build for iPhone
         working-directory: src
         run: |
           set -o pipefail
           export DEVELOPER_DIR="$(python3 -c 'import glob,re; p=glob.glob("/Applications/Xcode_26*.app"); print(max(p,key=lambda s:tuple(map(int,re.findall(r"[0-9]+",s)))))')/Contents/Developer"
           xcodebuild -version
-          xcodebuild -quiet -project 'TDS Video.xcodeproj' -scheme 'TDS Video' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/tds" -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -quiet -project 'TDS Video.xcodeproj' -scheme 'TDS Video' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/tds" -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=6 build
       - name: Package and encrypt
         run: |
           mkdir Payload
