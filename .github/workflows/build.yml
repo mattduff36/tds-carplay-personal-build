@@ -1,0 +1,54 @@
+name: Personal iPhone build
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch pinned source
+        run: |
+          git init src
+          git -C src fetch --depth 1 https://github.com/thomasdye12/TDS-Carplay.git 67659078a405102c7120e1d0962d3f03816ac12d
+          git -C src checkout --detach FETCH_HEAD
+      - name: Remove runtime overrides
+        working-directory: src
+        run: |
+          for f in 'TDS Video/AVPlayerViewController+ButtonInteractionSwizzling.m' 'TDS Video/AVPlayerViewController.m' 'TDS Video/CPTemplateApplicationScene+Swizzle.m'; do
+            test -s "$f"
+            echo '// Runtime overrides excluded from this personal build.' > "$f"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("CarPlaySceneDelegate.swift")
+          s = p.read_text()
+          a = s.index("extension CPTemplateApplicationScene {")
+          b = s.index("class CarPlaySceneDelegate:", a)
+          p.write_text(s[:a] + s[b:])
+          PY
+      - name: Build for iPhone
+        working-directory: src
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          xcodebuild -quiet -project 'TDS Video.xcodeproj' -scheme 'TDS Video' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/tds" -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO build
+      - name: Package and encrypt
+        run: |
+          mkdir Payload
+          cp -R "$RUNNER_TEMP/tds/Build/Products/Release-iphoneos/TDS Video.app" Payload/
+          binary="Payload/TDS Video.app/TDS Video"
+          test -s "$binary"
+          strings "$binary" > "$RUNNER_TEMP/strings"
+          if grep -Eq 'bypass_clientPushedIllegalTemplateOfClass|xyz_shouldCreateCarWindow|xyz__supportsCarFullScreen' "$RUNNER_TEMP/strings"; then exit 1; fi
+          ditto -c -k --keepParent Payload TDS.ipa
+          shasum -a 256 TDS.ipa
+          "$(brew --prefix openssl@3)/bin/openssl" cms -encrypt -binary -aes-256-cbc -outform DER -in TDS.ipa -out personal.cms recipient.pem
+      - uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-personal-build
+          path: personal.cms
+          retention-days: 1
