@@ -49,7 +49,14 @@ jobs:
                   if let number = CMGetAttachment(sample, key: RPVideoSampleOrientationKey as CFString,
                                                   attachmentModeOut: nil) as? NSNumber,
                      let value = CGImagePropertyOrientation(rawValue: number.uint32Value) {
-                      lastCaptureOrientation = value
+                      // Correct the half-turn observed in both landscape broadcasts.
+                      switch value {
+                      case .left: lastCaptureOrientation = .right
+                      case .right: lastCaptureOrientation = .left
+                      case .leftMirrored: lastCaptureOrientation = .rightMirrored
+                      case .rightMirrored: lastCaptureOrientation = .leftMirrored
+                      default: lastCaptureOrientation = value
+                      }
                   }
                   orientationLock.lock()
                   let offset = viewerOrientation
@@ -115,13 +122,27 @@ jobs:
               }''').replace('        currentFrame = image','        frameLock.lock()\n        latestFrame = image\n        frameLock.unlock()')
           p.write_text(s)
           PY
+      - name: Add driving dashboard
+        run: |
+          cp Dashboard.swift "src/TDS Video/VIews/Dashboard.swift"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/TDS Video/VIews/MainView.swift")
+          s = p.read_text()
+          marker = '                NavigationLink(destination: WebServerPage())'
+          assert s.count(marker) == 1
+          p.write_text(s.replace(marker, '''                NavigationLink(destination: DashboardSetup()) {
+                              Label("Driving dashboard", systemImage: "car")
+                          }
+          ''' + marker))
+          PY
       - name: Build for iPhone
         working-directory: src
         run: |
           set -o pipefail
           export DEVELOPER_DIR="$(python3 -c 'import glob,re; p=glob.glob("/Applications/Xcode_26*.app"); print(max(p,key=lambda s:tuple(map(int,re.findall(r"[0-9]+",s)))))')/Contents/Developer"
           xcodebuild -version
-          xcodebuild -quiet -project 'TDS Video.xcodeproj' -scheme 'TDS Video' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/tds" -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=6 build
+          xcodebuild -quiet -project 'TDS Video.xcodeproj' -scheme 'TDS Video' -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/tds" -onlyUsePackageVersionsFromResolvedFile CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION=7 build
       - name: Package and encrypt
         run: |
           mkdir Payload
