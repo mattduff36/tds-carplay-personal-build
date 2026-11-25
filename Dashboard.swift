@@ -32,14 +32,27 @@ final class DashboardHost: NSObject, ObservableObject, CXCallObserverDelegate {
         refresh()
     }
 
+    private let sessionKey = "TDSActiveDashboardSession"
+    private var retry: DispatchWorkItem?
+
     func start() {
         guard !running else { return }
+        UserDefaults.standard.set(UUID().uuidString, forKey: sessionKey)
+        resume()
+    }
+
+    func resume() {
+        guard let token = UserDefaults.standard.string(forKey: sessionKey) else { return }
+        retry?.cancel()
+        running = true
+        server?.stop()
+        server = nil
+        addresses = []
         let ips = HTTPServer.shared.getAllIPAddresses().compactMap { entry -> String? in
             guard entry.hasPrefix("en0: ") else { return nil }
             return String(entry.dropFirst(5))
         }
-        guard !ips.isEmpty else { message = "Connect the iPhone to Wi-Fi and try again."; return }
-        let token = UUID().uuidString
+        guard !ips.isEmpty else { retryListening("Waiting for Wi-Fi…"); return }
         let host = HttpServer()
         host["/dashboard"] = { _ in .ok(.html(dashboardHTML)) }
         host["/dashboard/state"] = { [weak self] request in
@@ -62,11 +75,22 @@ final class DashboardHost: NSObject, ObservableObject, CXCallObserverDelegate {
             running = true
             message = ""
         } catch {
-            message = error.localizedDescription
+            retryListening(error.localizedDescription)
         }
     }
 
+    private func retryListening(_ reason: String) {
+        message = reason
+        let task = DispatchWorkItem { [weak self] in self?.resume() }
+        retry = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: task)
+    }
+
     func stop() {
+        UserDefaults.standard.removeObject(forKey: sessionKey)
+        retry?.cancel()
+        retry = nil
+        message = ""
         server?.stop()
         server = nil
         observer?.setDelegate(nil, queue: nil)
@@ -78,7 +102,6 @@ final class DashboardHost: NSObject, ObservableObject, CXCallObserverDelegate {
 
 struct DashboardSetup: View {
     @ObservedObject var host = DashboardHost.shared
-    @Environment(\.scenePhase) var scenePhase
     var body: some View {
         Form {
             Section {
@@ -95,9 +118,7 @@ struct DashboardSetup: View {
             }
         }
         .navigationTitle("Driving dashboard")
-        .onChange(of: scenePhase) { phase in
-            if phase == .active { host.refresh() }
-        }
+
     }
 }
 
